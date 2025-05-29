@@ -121,15 +121,27 @@ def count_accounts(conn, label: str = ""):
 
 
 
-def reset_database():
+def reset_database(database_name: str):
     conn = get_connection("READ COMMITTED")
     try:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE accounts")
-            cur.execute("INSERT INTO accounts (account_holder, balance) VALUES (%s, %s)", ("Alice", "1000.0"))
-            cur.execute("INSERT INTO accounts (account_holder, balance) VALUES (%s, %s)", ("Bob", "500.0"))
-            conn.commit()
-            print("\n[INFO] Database reset to initial state.")
+        if database_name == "accounts":
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE accounts")
+                cur.execute("INSERT INTO accounts (account_holder, balance) VALUES (%s, %s)", ("Alice", "1000.0"))
+                cur.execute("INSERT INTO accounts (account_holder, balance) VALUES (%s, %s)", ("Bob", "500.0"))
+                conn.commit()
+                print("\n[INFO] Database reset to initial state.")
+
+        if database_name == "seats":
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE seats")
+                cur.execute("INSERT INTO seats (status) VALUES (%s)", ("booked",))
+                cur.execute("INSERT INTO seats (status) VALUES (%s)", ("booked",))
+                cur.execute("INSERT INTO seats (status) VALUES (%s)", ("available",))
+                cur.execute("INSERT INTO seats (status) VALUES (%s)", ("booked",))
+                conn.commit()
+                print("\n[INFO] Database reset to initial state.")
+                
     except mysql.connector.Error as e:
         print(f"[ERROR] Error resetting database: {e}")
         conn.rollback()
@@ -188,7 +200,7 @@ def dirty_read():
             conn.close()
 
 
-    reset_database()
+    reset_database("accounts")
 
     thread1 = Thread(target=transaction_1, args=("READ UNCOMMITTED",))
     thread2 = Thread(target=transaction_2, args=("READ UNCOMMITTED",))
@@ -201,7 +213,7 @@ def dirty_read():
 
     print("________________________________________________________")
 
-    reset_database()
+    reset_database("accounts")
     tx_1_update.clear()
     tx_2_read.clear()
 
@@ -268,7 +280,7 @@ def non_repeatable_read():
             conn.close()
 
 
-    reset_database()
+    reset_database("accounts")
 
     thread1 = Thread(target=transaction_1, args=("READ COMMITTED",))
     thread2 = Thread(target=transaction_2, args=("READ COMMITTED",))
@@ -281,7 +293,7 @@ def non_repeatable_read():
 
     print("__________________________________________________________")
 
-    reset_database()
+    reset_database("accounts")
 
     tx_1_update.clear()
     tx_2_read.clear()
@@ -351,7 +363,7 @@ def phantom_read():
         finally:
             conn.close()
 
-    reset_database()
+    reset_database("accounts")
 
     thread1 = Thread(target=transaction_1, args=("READ COMMITTED",))
     thread2 = Thread(target=transaction_2, args=("READ COMMITTED",))
@@ -363,7 +375,11 @@ def phantom_read():
     thread2.join()
     print("____________________________________________________________")
 
-    reset_database()
+    reset_database("accounts")
+
+    tx_1_insert.clear()
+    tx_2_read.clear()
+
     thread1 = Thread(target=transaction_1, args=("SERIALIZABLE",))
     thread2 = Thread(target=transaction_2, args=("SERIALIZABLE",))
 
@@ -374,13 +390,131 @@ def phantom_read():
     thread2.join()
 
 def task_1():
-    reset_database()
+    reset_database("accounts")
     dirty_read()
 
-    reset_database()
+    reset_database("accounts")
     non_repeatable_read()
 
-    reset_database()
+    reset_database("accounts")
     phantom_read()
 
 # task_1()
+
+def check_seat(conn, id: int, label: str = "") -> bool:
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM seats WHERE seat_id = %s", (id,))
+            status = cursor.fetchone()
+
+            if (status[1] == "available"): return True
+            return False
+
+    except mysql.connector.Error as e:
+        print(f"[ERROR] Error starting transaction 1: {e}")
+        return False
+
+def update_seat_status_to_booked(conn, id: int, label: str = ""):
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE seats SET status = 'booked' WHERE seat_id = %s", (id,))
+
+            print(f"\n[{label}] Succesfully booked seat with id [{id}]")
+
+    except mysql.connector.Error as e:
+        print(f"[ERROR] Error starting transaction 1: {e}")
+
+def task_2():
+    tx_1_book = Event()
+    tx_2_book = Event()
+
+    def transaction_1(conn_str):
+        conn = get_connection(conn_str)
+
+        try:
+            print(f"\n[Tx1-{conn_str}] Starting transaction 1.")
+            conn.start_transaction()
+
+            check = check_seat(conn, 3)
+            tx_1_book.set()
+
+            tx_2_book.wait()
+            tx_1_book.clear()
+
+            print(f"\n[Tx1-{conn_str}] USER 1:")
+            if check:
+                update_seat_status_to_booked(conn, 3)
+            else:
+                print(f"\n[Tx1-{conn_str}] Seat not available")
+
+            tx_1_book.set()
+            tx_2_book.wait()
+
+            conn.commit()
+        except mysql.connector.Error as e:
+            print(f"[ERROR] Error starting transaction 1: {e}")
+            conn.rollback()
+            print("Transaction 1 rollbacked")
+
+        finally:
+            conn.close()
+
+    def transaction_2(conn_str):
+        conn = get_connection(conn_str)
+
+        try:
+            print(f"\n[Tx2-{conn_str}] Starting transaction 2.")
+            conn.start_transaction()
+
+            tx_1_book.wait()
+
+            check = check_seat(conn, 3)
+
+            tx_2_book.set()
+
+            tx_1_book.wait()
+            tx_2_book.clear()
+
+            print(f"\n[Tx2-{conn_str}] USER 2:")
+            if check:
+                update_seat_status_to_booked(conn, 3)
+            else:
+                print(f"\n[Tx2-{conn_str}] Seat not available")
+
+            tx_2_book.set()
+            conn.commit()
+
+        except mysql.connector.Error as e:
+            print(f"[ERROR] Error starting transaction 2: {e}")
+            conn.rollback()
+            print("Transaction 2 rollbacked")
+
+        finally:
+            conn.close()
+
+    reset_database("seats")
+
+    thread1 = Thread(target=transaction_1, args=("READ UNCOMMITTED",))
+    thread2 = Thread(target=transaction_2, args=("READ UNCOMMITTED",))
+
+    thread1.start()
+    thread2.start()
+
+    thread1.join()
+    thread2.join()
+    print("____________________________________________________________")
+    reset_database("seats")
+
+    tx_1_book.clear()
+    tx_2_book.clear()
+
+    thread1 = Thread(target=transaction_1, args=("SERIALIZABLE",))
+    thread2 = Thread(target=transaction_2, args=("SERIALIZABLE",))
+
+    thread1.start()
+    thread2.start()
+
+    thread1.join()
+    thread2.join()
+
+# task_2()
