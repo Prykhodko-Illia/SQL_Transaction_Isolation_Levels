@@ -383,4 +383,4 @@ def task_1():
     reset_database()
     phantom_read()
 
-# task_1
+# task_1()
